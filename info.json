@@ -15,10 +15,10 @@
       "display": "翻译模式",
       "type": "select",
       "options": {
-        "auto": "智能模式（单词：混元快速译文 + Qwen 词典卡片；句子：混元翻译）",
+        "auto": "智能模式（推荐）",
         "dual": "双模型对照",
-        "hunyuan": "全部由 Hunyuan-MT-7B 输出（快速译文 / 词典 / 翻译）",
-        "qwen": "全部由 Qwen2.5-7B 输出（快速译文 / 词典 / 翻译）"
+        "hunyuan": "仅混元",
+        "qwen": "仅 Qwen"
       }
     },
     {
@@ -26,9 +26,9 @@
       "display": "词典模式",
       "type": "select",
       "options": {
-        "auto": "自动判断（单词/短语/固定搭配按词典输出，句子直接翻译）",
-        "always": "总是按词典格式输出",
-        "never": "总是直接输出译文"
+        "auto": "自动判断",
+        "always": "总是词典格式",
+        "never": "总是直接翻译"
       }
     },
     {

@@ -81,17 +81,27 @@ const DEFAULT_WORD_PROMPT = [
     '只输出 JSON 本身，不要输出任何其他文字。',
 ].join('\n');
 
-// 结构化 JSON 输出解析失败时的纯文本词典兜底 Prompt（自动重试一次用，保证输出始终可读）
+// 行格式纯文本词典 Prompt（混元主用，也作为 JSON 词典失败时的兜底）：
+// 混元等模型对纯文本的遵循度远好于 JSON，输出由插件解析成 pot 词典卡片
 const DEFAULT_WORD_TEXT_PROMPT = [
-    '请查询 <<< >>> 之间的词条（词条语言：$from），像一本权威双语词典一样用纯文本解释，不要使用 JSON、代码块或 markdown 格式。释义与例句译文使用 $to，按顺序包含：',
-    '1. 音标：英语词条分别给出美式和英式 IPA 音标；日语给假名读音；中文给拼音',
-    '2. 分词性释义：每个词性一行，如 "n. 释义1；释义2；释义3"',
-    '3. 屈折变化与固定搭配：复数、第三人称单数、过去式、过去分词、现在分词、比较级、最高级等（如适用），俚语/习语也在此标注',
-    '4. 1 个典型例句（原句 + $to 译文）',
+    '请查询 <<< >>> 之间的词条（词条语言：$from），像一本权威双语词典一样解释，释义与例句译文使用 $to。',
+    '严格按下面的行格式逐行输出（每行一条，不要 markdown、不要代码块、不要输出格式之外的话）：',
+    '英音: /英式IPA音标/',
+    '美音: /美式IPA音标/',
+    '（上面两行英语词条必填；日语词条把这两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
+    'n. 释义1；释义2；释义3',
+    '（每个词性一行，词性可用 n. v. vt. vi. adj. adv. prep. conj. 等，每词性给出 1~3 个常用释义）',
+    '复数: xxx',
+    '（屈折变化行：复数、第三人称单数、过去式、过去分词、现在分词、比较级、最高级等，各占一行，按适用给出，没有可省略）',
+    '搭配: xxx',
+    '（常用搭配或短语，可多行，没有可省略）',
+    '例句: 一句典型例句原文',
+    '译文: 上面例句的$to译文',
     '词条：',
     '<<<',
     '$text',
     '>>>',
+    '只输出以上格式的行，不要输出任何其他内容。',
 ].join('\n');
 
 // 快速翻译 Prompt（输出极短，几秒内先行展示，词典卡片随后替换）
@@ -359,6 +369,92 @@ function parseDictJSON(raw) {
     return Object.values(dict).some((arr) => arr.length > 0) ? dict : null;
 }
 
+// 把按行格式输出的纯文本词典解析为 pot 词典结构（混元等模型的纯文本输出质量高）；
+// 解析不出有效字段时返回 null（调用方回退展示原文）
+function parseDictText(raw) {
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    const lines = raw
+        .split(/\r?\n/)
+        .map((l) => l.replace(/^\s*[-*•·]\s*/, '').trim())
+        .filter(Boolean);
+    const dict = { pronunciations: [], explanations: [], associations: [], sentence: [] };
+    let curSource = '';
+    let pending = null; // 'source' | 'target' —— 例句/译文为悬空标题行时承接下一行
+    const posRe = /^(n|v|vt|vi|adj|adv|prep|conj|pron|int|art|num|aux|abbr)\s*\.\s*/i;
+    const inflRe = /^(复数|单数|第三人称单数|过去式|过去分词|现在分词|比较级|最高级|词形变化|屈折变化?)\s*[:：]?\s*(.*)$/;
+
+    for (const line of lines) {
+        let m;
+        // 一行同时给英/美音的情况：如 “英 /həˈləʊ/ 美 /həˈloʊ/”
+        if ((m = line.match(/^(?:英音?|英式)\s*[:：]?\s*(\/[^/]+\/)\s*[,，;；]?\s*(?:美音?|美式)\s*[:：]?\s*(\/[^/]+\/)\s*$/i))) {
+            dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
+            dict.pronunciations.push({ region: 'us', symbol: m[2].trim() });
+        } else if ((m = line.match(/^(?:音标\s*)?(?:英音|英式|英|uk)\s*[:：]?\s*(.+)$/i))) {
+            dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
+        } else if ((m = line.match(/^(?:音标\s*)?(?:美音|美式|美|us)\s*[:：]?\s*(.+)$/i))) {
+            dict.pronunciations.push({ region: 'us', symbol: m[1].trim() });
+        } else if ((m = line.match(/^(?:假名|拼音|读音)\s*[:：]\s*(.+)$/))) {
+            dict.pronunciations.push({ region: '', symbol: m[1].trim() });
+        } else if ((m = line.match(posRe))) {
+            const explains = line
+                .slice(m[0].length)
+                .split(/[；;]/)
+                .map((s) => s.trim())
+                .filter(Boolean);
+            if (explains.length) dict.explanations.push({ trait: m[1].toLowerCase() + '.', explains });
+        } else if ((m = line.match(inflRe))) {
+            const value = (m[2] || '').trim();
+            if (value) {
+                value
+                    .split(/[；;]/)
+                    .map((x) => x.trim())
+                    .filter(Boolean)
+                    .forEach((item) => dict.associations.push(m[1] + ' ' + item));
+            }
+        } else if ((m = line.match(/^(?:常用搭配|搭配短语|固定搭配|搭配|短语|用法)\s*[:：]?\s*(.*)$/))) {
+            const body = (m[1] || '').trim();
+            if (body) {
+                body.split(/[；;]/).forEach((x) => {
+                    const item = x.trim();
+                    if (item && dict.associations.length < 10) dict.associations.push(item);
+                });
+            }
+        } else if ((m = line.match(/^(?:例句|例)\s*[:：]?\s*(.*)$/))) {
+            const body = (m[1] || '').trim();
+            if (body) {
+                curSource = body;
+                pending = 'target';
+            } else {
+                pending = 'source';
+            }
+        } else if ((m = line.match(/^(?:译文|翻译)\s*[:：]?\s*(.*)$/))) {
+            const body = (m[1] || '').trim();
+            if (curSource && body) {
+                dict.sentence.push({ source: curSource, target: body });
+                pending = null;
+            } else if (!body) {
+                pending = 'target';
+            } else {
+                pending = null;
+            }
+            curSource = '';
+        } else if (pending === 'source') {
+            curSource = line;
+            pending = 'target';
+        } else if (pending === 'target') {
+            if (curSource) dict.sentence.push({ source: curSource, target: line });
+            curSource = '';
+            pending = null;
+        } else if (dict.associations.length < 10) {
+            // 其余非空行（未带标题的搭配、注释等）收进 associations
+            dict.associations.push(line);
+        }
+    }
+
+    if (dict.pronunciations.length || dict.explanations.length || dict.sentence.length) return dict;
+    return null;
+}
+
 async function translate(text, from, to, options) {
     const { config, detect, setResult, utils } = options;
     const { tauriFetch: fetch, http } = utils;
@@ -394,94 +490,57 @@ async function translate(text, from, to, options) {
     const chat = (model, msgs, temp, onDelta) =>
         requestChatStream(fetch, http, apiUrl, apiKey, model, msgs || messages, temp ?? (useDict ? 0.3 : 0.7), onDelta);
 
-    // 结构化 JSON 失败时的纯文本词典重试消息
-    const textRetryMessages = () => [
+    // 行格式纯文本词典消息（混元主用；也作为 JSON 词典失败时的兜底）
+    const textDictMessages = () => [
         { role: 'system', content: messages[0].content },
         { role: 'user', content: fillPrompt(DEFAULT_WORD_TEXT_PROMPT, text, from, to, detect) },
     ];
 
-    // 词典 + 快速译文：
-    // - 不同模型（智能模式）：并行，混元快速译文先行展示，词典就绪后替换
-    // - 同一模型（单模型模式）：串行，先快速译文再词典，避免免费档同模型并发受限
-    // - 混元做词典时直接用纯文本格式（其 JSON 指令遵循很差，可能长时间空转不输出）
-    const dictWithQuickInterim = async (quickModel, dictModel) => {
-        const sameModel = quickModel === dictModel;
-        const quickMessages = [
-            { role: 'system', content: messages[0].content },
-            { role: 'user', content: fillPrompt(QUICK_TRANSLATE_PROMPT, text, from, to, detect) },
-        ];
-        let quickLive = true;
-        const showQuick = (v) => {
-            if (quickLive && setResult) setResult(v);
-        };
-        const finishWith = (value) => {
-            quickLive = false;
-            return value;
-        };
+    const quickMessages = [
+        { role: 'system', content: messages[0].content },
+        { role: 'user', content: fillPrompt(QUICK_TRANSLATE_PROMPT, text, from, to, detect) },
+    ];
 
-        if (!sameModel) {
-            const quickPromise = chat(quickModel, quickMessages, 0.7, showQuick).then(
-                (content) => content,
-                () => ''
-            );
-            const dict = await chat(dictModel).then((c) => parseDictJSON(c), () => null);
-            if (dict) return finishWith(dict);
-            const retry = await chat(dictModel, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
-                (content) => content,
-                () => ''
-            );
-            if (retry) return finishWith(retry);
-            const quick = await quickPromise;
-            if (quick) return finishWith(quick);
-            throw '词典查询失败：请检查 API Key、网络或稍后重试';
-        }
-
-        // 同模型串行：先快速译文（先行展示），再词典
-        const quick = await chat(quickModel, quickMessages, 0.7, showQuick).then(
-            (content) => content,
-            () => ''
+    // 快速译文（极短输出，先行展示）
+    const quickVia = (model, show) =>
+        chat(model, quickMessages, 0.7, show).then((content) => content, () => '');
+    // JSON 词典（Qwen 等指令模型），解析成 pot 词典卡片
+    const jsonDictVia = (model) =>
+        chat(model).then(
+            (content) => ({ content, dict: parseDictJSON(content) }),
+            () => ({ content: '', dict: null })
         );
-        if (dictModel !== MODEL_HUNYUAN) {
-            const dict = await chat(dictModel).then((c) => parseDictJSON(c), () => null);
-            if (dict) return finishWith(dict);
-        }
-        const textDict = await chat(dictModel, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
-            (content) => content,
-            () => ''
+    // 行格式纯文本词典（输出边生成边展示，完成后解析成词典卡片；解析失败回退展示原文）
+    const textDictVia = (model, show) =>
+        chat(model, textDictMessages(), null, show).then(
+            (content) => ({ content, dict: parseDictText(content) }),
+            () => ({ content: '', dict: null })
         );
-        if (textDict) return finishWith(textDict);
-        if (quick) return finishWith(quick);
-        throw '词典查询失败：请检查 API Key、网络或稍后重试';
-    };
 
-    // 翻译模式：
-    // auto     —— 单词/短语：混元快速译文先行 + Qwen 词典卡片；句子：混元翻译
-    // dual     —— 双模型对照：词典任一先就绪即显示；句子分别实时流式展示
-    // hunyuan / qwen —— 全部由该模型输出（快速译文、词典、翻译都是同一个模型）
+    // 翻译模式（词典查询的模型分工）：
+    // auto     —— 混元快速译文先行 → 混元行格式词典（解析成卡片，质量优先）∥ Qwen JSON 词典（并行兜底）
+    // dual     —— 混元行格式词典（流式展示，优先）∥ Qwen JSON 词典（兜底）；句子两栏实时流式
+    // hunyuan / qwen —— 全部由该模型输出（同模型请求串行）
     if (mode === 'dual') {
         if (useDict) {
-            // Qwen 输出 JSON 词典（解析成卡片）；混元 JSON 指令遵循差，直接用纯文本词典，
-            // 其输出先行流式展示，Qwen 词典卡片就绪后替换
-            let hunyuanLive = true;
-            const hunyuanPromise = chat(MODEL_HUNYUAN, textRetryMessages(), null, (v) => {
-                if (hunyuanLive && setResult) setResult(v);
-            }).then(
-                (content) => content,
-                () => ''
-            );
-            const qwenDict = await chat(MODEL_QWEN).then((c) => parseDictJSON(c), () => null);
-            if (qwenDict) {
-                hunyuanLive = false;
-                return qwenDict;
-            }
-            const hunyuanText = await hunyuanPromise;
-            if (hunyuanText) return hunyuanText;
-            // 两个模型都失败：Qwen 再用纯文本词典格式重试一次
-            const qwenRetry = await chat(MODEL_QWEN, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
-                (content) => content,
-                () => ''
-            );
-            if (qwenRetry) return qwenRetry;
+            let live = true;
+            const show = (v) => {
+                if (live && setResult) setResult(v);
+            };
+            const finish = (v) => {
+                live = false;
+                return v;
+            };
+            const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
+            const qwenP = jsonDictVia(MODEL_QWEN);
+            const hun = await hunyuanP;
+            if (hun.dict) return finish(hun.dict);
+            const qwen = await qwenP;
+            if (qwen.dict) return finish(qwen.dict);
+            const qwenText = await textDictVia(MODEL_QWEN, show);
+            if (qwenText.dict) return finish(qwenText.dict);
+            if (qwenText.content) return finish(qwenText.content);
+            if (hun.content) return finish(hun.content);
             throw '词典查询失败（两个模型均未返回有效结果）：请检查 API Key、网络或稍后重试';
         }
 
@@ -533,8 +592,29 @@ async function translate(text, from, to, options) {
     }
 
     if (mode === 'auto' && useDict) {
-        // 智能模式查词：混元快速译文先行 + Qwen 词典卡片
-        return await dictWithQuickInterim(MODEL_HUNYUAN, MODEL_QWEN);
+        // 智能模式查词：Qwen JSON 词典并行提前发出；混元快速译文先行（1~2 秒），
+        // 随后混元行格式词典（质量更好）流式展示并解析成卡片
+        let live = true;
+        const show = (v) => {
+            if (live && setResult) setResult(v);
+        };
+        const finish = (v) => {
+            live = false;
+            return v;
+        };
+        const qwenP = jsonDictVia(MODEL_QWEN);
+        const quick = await quickVia(MODEL_HUNYUAN, show);
+        const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
+        const hun = await hunyuanP;
+        if (hun.dict) return finish(hun.dict);
+        const qwen = await qwenP;
+        if (qwen.dict) return finish(qwen.dict);
+        const qwenText = await textDictVia(MODEL_QWEN, show);
+        if (qwenText.dict) return finish(qwenText.dict);
+        if (qwenText.content) return finish(qwenText.content);
+        if (hun.content) return finish(hun.content);
+        if (quick) return finish(quick);
+        throw '词典查询失败：请检查 API Key、网络或稍后重试';
     }
 
     let model = MODEL_QWEN;
@@ -542,8 +622,30 @@ async function translate(text, from, to, options) {
     else if (mode === 'auto') model = MODEL_HUNYUAN; // auto 且非词典（句子）
 
     if (useDict) {
-        // 单模型模式：快速译文、词典、兜底全部由同一个模型输出
-        return await dictWithQuickInterim(model, model);
+        // 单模型模式：快速译文、词典全部由同一个模型输出（串行，避免同模型并发受限）
+        let live = true;
+        const show = (v) => {
+            if (live && setResult) setResult(v);
+        };
+        const finish = (v) => {
+            live = false;
+            return v;
+        };
+        const quick = await quickVia(model, show);
+        if (model === MODEL_HUNYUAN) {
+            // 混元：直接行格式纯文本词典（解析成卡片），不尝试 JSON
+            const hun = await textDictVia(model, show);
+            if (hun.dict) return finish(hun.dict);
+            if (hun.content) return finish(hun.content);
+        } else {
+            const qj = await jsonDictVia(model);
+            if (qj.dict) return finish(qj.dict);
+            const qt = await textDictVia(model, show);
+            if (qt.dict) return finish(qt.dict);
+            if (qt.content) return finish(qt.content);
+        }
+        if (quick) return finish(quick);
+        throw '词典查询失败：请检查 API Key、网络或稍后重试';
     }
 
     return await chat(model, null, null, (v) => setResult && setResult(v));
