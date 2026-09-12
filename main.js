@@ -219,6 +219,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 两种路径的返回值都是去标记后的完整文本
 async function requestChatStream(fetch, http, apiUrl, apiKey, model, messages, temperature, onDelta) {
     if (typeof globalThis.fetch === 'function') {
+        // 90 秒超时保险：模型空转时中断请求，避免结果区无限转圈
+        const ac = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            ac.abort();
+        }, 90000);
         try {
             const res = await globalThis.fetch(apiUrl, {
                 method: 'POST',
@@ -227,6 +234,7 @@ async function requestChatStream(fetch, http, apiUrl, apiKey, model, messages, t
                     Authorization: `Bearer ${apiKey}`,
                 },
                 body: JSON.stringify({ model, messages, stream: true, temperature, max_tokens: 4096 }),
+                signal: ac.signal,
             });
             if (res.ok && res.body && typeof res.body.getReader === 'function') {
                 const reader = res.body.getReader();
@@ -275,7 +283,12 @@ async function requestChatStream(fetch, http, apiUrl, apiKey, model, messages, t
             if (content) return content;
             throw '硅基流动 API 未返回内容';
         } catch (e) {
+            if (timedOut) {
+                throw '硅基流动请求超时（90 秒）：模型可能暂时不可用，请稍后重试或更换翻译模式';
+            }
             // 原生 fetch 失败（CORS/网络等），回退到 tauriFetch
+        } finally {
+            clearTimeout(timer);
         }
     }
 
@@ -387,54 +400,56 @@ async function translate(text, from, to, options) {
         { role: 'user', content: fillPrompt(DEFAULT_WORD_TEXT_PROMPT, text, from, to, detect) },
     ];
 
-    // 结构化 JSON 不可用时，改用纯文本词典格式重试一次（保证不把原始 JSON 展示给用户）
-    const dictTextFallback = async (prevResults) => {
-        const retried = await Promise.all(
-            prevResults.map((r, i) =>
-                r.ok
-                    ? chat(MODELS[i], textRetryMessages(), null, (v) => setResult && setResult(v)).then(
-                          (content) => ({ ok: true, content }),
-                          (error) => ({ ok: false, content: '', error: String(error) })
-                      )
-                    : Promise.resolve(r)
-            )
-        );
-        if (retried.every((r) => !r.ok)) {
-            throw `所有模型均调用失败\n${MODELS.map((m, i) => `${m}: ${retried[i].error}`).join('\n')}`;
-        }
-        return retried
-            .map((r, i) => LABELS[i] + '\n' + (r.ok ? r.content : `⚠️ ${MODELS[i]} 调用失败：${r.error}`))
-            .join('\n\n');
-    };
-
-    // 单模型/智能模式 + 词典：快速译文先行展示（几秒内），词典卡片就绪后自动替换；
-    // 词典失败时依次尝试纯文本词典重试、快速译文兜底
+    // 词典 + 快速译文：
+    // - 不同模型（智能模式）：并行，混元快速译文先行展示，词典就绪后替换
+    // - 同一模型（单模型模式）：串行，先快速译文再词典，避免免费档同模型并发受限
+    // - 混元做词典时直接用纯文本格式（其 JSON 指令遵循很差，可能长时间空转不输出）
     const dictWithQuickInterim = async (quickModel, dictModel) => {
-        // quickLive：词典/重试结果返回后立即失效，防止快速译文流的迟到回调覆盖词典卡片
-        let quickLive = true;
+        const sameModel = quickModel === dictModel;
         const quickMessages = [
             { role: 'system', content: messages[0].content },
             { role: 'user', content: fillPrompt(QUICK_TRANSLATE_PROMPT, text, from, to, detect) },
         ];
-        const quickPromise = chat(quickModel, quickMessages, 0.7, (v) => {
+        let quickLive = true;
+        const showQuick = (v) => {
             if (quickLive && setResult) setResult(v);
-        }).then(
-            (content) => content,
-            () => ''
-        );
+        };
         const finishWith = (value) => {
             quickLive = false;
             return value;
         };
 
-        const dict = await chat(dictModel).then((c) => parseDictJSON(c), () => null);
-        if (dict) return finishWith(dict);
-        const retry = await chat(dictModel, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
+        if (!sameModel) {
+            const quickPromise = chat(quickModel, quickMessages, 0.7, showQuick).then(
+                (content) => content,
+                () => ''
+            );
+            const dict = await chat(dictModel).then((c) => parseDictJSON(c), () => null);
+            if (dict) return finishWith(dict);
+            const retry = await chat(dictModel, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
+                (content) => content,
+                () => ''
+            );
+            if (retry) return finishWith(retry);
+            const quick = await quickPromise;
+            if (quick) return finishWith(quick);
+            throw '词典查询失败：请检查 API Key、网络或稍后重试';
+        }
+
+        // 同模型串行：先快速译文（先行展示），再词典
+        const quick = await chat(quickModel, quickMessages, 0.7, showQuick).then(
             (content) => content,
             () => ''
         );
-        if (retry) return finishWith(retry);
-        const quick = await quickPromise;
+        if (dictModel !== MODEL_HUNYUAN) {
+            const dict = await chat(dictModel).then((c) => parseDictJSON(c), () => null);
+            if (dict) return finishWith(dict);
+        }
+        const textDict = await chat(dictModel, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
+            (content) => content,
+            () => ''
+        );
+        if (textDict) return finishWith(textDict);
         if (quick) return finishWith(quick);
         throw '词典查询失败：请检查 API Key、网络或稍后重试';
     };
@@ -445,32 +460,29 @@ async function translate(text, from, to, options) {
     // hunyuan / qwen —— 全部由该模型输出（快速译文、词典、翻译都是同一个模型）
     if (mode === 'dual') {
         if (useDict) {
-            const attempts = MODELS.map((model) =>
-                chat(model).then(
-                    (content) => ({ ok: true, content }),
-                    (error) => ({ ok: false, content: '', error: String(error) })
-                )
+            // Qwen 输出 JSON 词典（解析成卡片）；混元 JSON 指令遵循差，直接用纯文本词典，
+            // 其输出先行流式展示，Qwen 词典卡片就绪后替换
+            let hunyuanLive = true;
+            const hunyuanPromise = chat(MODEL_HUNYUAN, textRetryMessages(), null, (v) => {
+                if (hunyuanLive && setResult) setResult(v);
+            }).then(
+                (content) => content,
+                () => ''
             );
-            // 任一模型先产出合法词典 JSON 就立即返回，不等另一个（速度优先）
-            let pending = attempts.length;
-            const first = await new Promise((resolve) => {
-                let settled = false;
-                attempts.forEach((p) =>
-                    p.then((r) => {
-                        pending -= 1;
-                        const dict = r.ok ? parseDictJSON(r.content) : null;
-                        if (!settled && dict) {
-                            settled = true;
-                            resolve(dict);
-                        } else if (pending === 0 && !settled) {
-                            settled = true;
-                            resolve(null);
-                        }
-                    })
-                );
-            });
-            if (first) return first;
-            return await dictTextFallback(await Promise.all(attempts));
+            const qwenDict = await chat(MODEL_QWEN).then((c) => parseDictJSON(c), () => null);
+            if (qwenDict) {
+                hunyuanLive = false;
+                return qwenDict;
+            }
+            const hunyuanText = await hunyuanPromise;
+            if (hunyuanText) return hunyuanText;
+            // 两个模型都失败：Qwen 再用纯文本词典格式重试一次
+            const qwenRetry = await chat(MODEL_QWEN, textRetryMessages(), null, (v) => setResult && setResult(v)).then(
+                (content) => content,
+                () => ''
+            );
+            if (qwenRetry) return qwenRetry;
+            throw '词典查询失败（两个模型均未返回有效结果）：请检查 API Key、网络或稍后重试';
         }
 
         // 句子对照：两个模型的输出分别实时流式显示
