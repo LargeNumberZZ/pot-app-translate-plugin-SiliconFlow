@@ -15,10 +15,10 @@
       "display": "翻译模式",
       "type": "select",
       "options": {
-        "auto": "智能模式（单词/短语查词典，句子用混元直接翻译）",
-        "dual": "双模型对照（Hunyuan-MT-7B + Qwen2.5-7B）",
-        "hunyuan": "仅 tencent/Hunyuan-MT-7B",
-        "qwen": "仅 Qwen/Qwen2.5-7B-Instruct"
+        "auto": "智能模式（单词：混元快速译文 + Qwen 词典卡片；句子：混元翻译）",
+        "dual": "双模型对照",
+        "hunyuan": "全部由 Hunyuan-MT-7B 输出（快速译文 / 词典 / 翻译）",
+        "qwen": "全部由 Qwen2.5-7B 输出（快速译文 / 词典 / 翻译）"
       }
     },
     {
