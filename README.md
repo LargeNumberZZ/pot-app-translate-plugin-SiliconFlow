@@ -1,101 +1,89 @@
-# Pot-App 翻译插件模板仓库 (以 [Lingva](https://github.com/TheDavidDelta/lingva-translate) 为例)
+# pot-app-translate-plugin-SiliconFlow
 
-### 此仓库为模板仓库，编写插件时可以直接由此仓库创建插件仓库
+一个 [Pot](https://pot-app.com/) 划词翻译外部插件，接入 [硅基流动 SiliconFlow](https://siliconflow.cn) 平台的**免费**翻译模型：
 
-## 插件编写指南
+| 模型 | 特点 |
+| --- | --- |
+| `tencent/Hunyuan-MT-7B` | 腾讯混元翻译专用模型（WMT25 多语种第一），句子 / 段落翻译质量高、速度快 |
+| `Qwen/Qwen2.5-7B-Instruct` | 通用指令模型，擅长按指令做词典式结构化输出 |
 
-### 1. 插件仓库创建
+## 功能特性
 
-- 以此仓库为模板创建一个新的仓库
-- 仓库名为 `pot-app-translate-plugin-<插件名>`，例如 `pot-app-translate-plugin-lingva`
+- **智能模式（默认）**：自动识别待翻译内容——
+  - **单词 / 短语 / 固定搭配**（如 `hello`、`break down`、`画蛇添足`）：调用 Qwen2.5-7B 输出结构化词典，以 **pot 原生词典卡片**展示（与内置 ecdict / 必应词典效果一致）：音标（IPA / 假名 / 拼音）、分词性释义、复数 / 过去式等屈折变化、例句对照；
+  - **短句 / 长句 / 段落**：调用 Hunyuan-MT-7B 直接给出流畅译文。
+- **双模型对照**：同时调用两个模型，句子结果并列展示、渐进显示；单词的词典结果自动合并去重；单个模型失败不影响另一个。
+- **仅混元 / 仅 Qwen**：固定使用其中一个模型。
+- **自定义 Prompt**：词典模式 Prompt、句子翻译 Prompt、System Prompt 均可在服务配置中修改，留空则使用内置默认值。
+- 支持自定义 API 地址（默认官方 `https://api.siliconflow.cn/v1/chat/completions`），方便接入兼容接口或代理。
+- 词典输出解析失败时自动降级为纯文本翻译，不会报错中断。
 
-### 2. 插件信息配置
+## 安装
 
-编辑 `info.json` 文件，修改以下字段：
+1. 从本仓库 [Releases](https://github.com/LargeNumberZZ/pot-app-translate-plugin-SiliconFlow/releases)（或 Actions 构建产物）下载 `plugin.com.pot-app.siliconflow.potext`；
+2. 双击安装，或在 Pot 的 偏好设置 → 服务设置 中导入；
+3. 添加 "硅基流动 SiliconFlow" 翻译服务并填写 API Key。
 
-- `id`：插件唯一 id，必须以`plugin`开头，例如 `plugin.com.pot-app.lingva`
-- `homepage`: 插件主页，填写你的仓库地址即可，例如 `https://github.com/pot-app/pot-app-translate-plugin-template`
-- `display`: 插件显示名称，例如 `Lingva`
-- `icon`: 插件图标，例如 `lingva.svg`
-- `needs`: 插件依赖，一个数组，每个依赖为一个对象，包含以下字段：
-  - `key`: 依赖 key，对应该项依赖在配置文件中的名称，例如 `requestPath`
-  - `display`: 依赖显示名称，对应用户显示的名称，例如 `请求地址`
-  - `type`: 组件类型 `input` | `select`
-  - `options`: 选项列表(仅 select 组件需要)，例如 `{"engine_a":"Engina A","engine_b":"Engina B"}`
-- `language`: 插件支持的语言映射，将 pot 的语言代码和插件发送请求时的语言代码一一对应
+API Key 在 [硅基流动控制台](https://cloud.siliconflow.cn) 注册后即可免费获取。
 
-### 3. 插件编写
+## 配置项
 
-编辑 `main.js` 实现 `translate` 函数
+| 配置 | 说明 |
+| --- | --- |
+| API Key | 硅基流动 API Key（必填） |
+| 翻译模式 | 智能模式（默认）/ 双模型对照 / 仅 Hunyuan-MT-7B / 仅 Qwen2.5-7B |
+| 词典模式 | 自动判断（默认）/ 总是按词典格式输出 / 总是直接输出译文 |
+| 词典模式 Prompt | 单词 / 短语使用的 Prompt，留空用默认 |
+| 句子翻译 Prompt | 句子 / 段落使用的 Prompt，留空用默认 |
+| System Prompt | 系统消息，留空用默认 |
+| API 地址 | 留空用官方默认，可指向兼容 OpenAI Chat API 的地址 |
 
-#### 输入参数
+## 自定义 Prompt
 
-```javascript
-// config: config map
-// detect: detected source language
-// setResult: function to set result text
-// utils: some tools
-//     http: tauri http module
-//     readBinaryFile: function
-//     readTextFile: function
-//     Database: tauri Database class
-//     CryptoJS: CryptoJS module
-//     cacheDir: cache dir path
-//     pluginDir: current plugin dir 
-//     osType: "Windows_NT" | "Darwin" | "Linux"
-async function translate(text, from, to, options) {
-  const { config, detect, setResult, utils } = options;
-  const { http, readBinaryFile, readTextFile, Database, CryptoJS, run, cacheDir, pluginDir, osType } = utils;
-  const { fetch, Body } = http;
-}
+通过自定义 Prompt 自定义 AI 行为，`$text` `$from` `$to` `$detect` 将会被替换为待翻译文本、源语言、目标语言和检测到的语言（与 Pot 内置 AI 服务一致）。语言会被替换为英文名称（如 `zh_cn` → `Simplified Chinese`），便于模型理解。
+
+例如，想让句子翻译总是输出更书面化的结果，可以把"句子翻译 Prompt"改为：
+
+```text
+请将下面的内容从 $from 翻译成 $to，使用正式书面语体，只输出译文：
+"""
+$text
+"""
 ```
 
-#### 返回值
+> 提示：
+> - 如果希望所有输入都按词典格式（或都直接翻译）输出，把"词典模式"设为"总是词典"或"总是直接翻译"即可，无需修改 Prompt。
+> - 默认的"词典模式 Prompt"要求模型输出 pot 词典 JSON 结构以获得词典卡片效果；若你自定义该 Prompt，输出将按纯文本展示（解析不出词典 JSON 时自动降级）。
 
-```javascript
-// 文本翻译直接返回字符串
-return "result";
-// 流式输出使用options中的setResult函数
-setResult("result");
+## 词典模式判定规则（自动判断时）
+
+- 文本含换行，或以 `.。!！?？;；:：` 等句末标点结尾 → 按句子翻译；
+- 以中日韩文字为主：4 字及以内 → 词 / 短语 / 成语，走词典模式；
+- 其他语言：4 个单词及以内 → 词 / 短语，走词典模式；
+- 其余情况 → 句子翻译。
+
+## 开发
+
+插件结构遵循 [pot-app 插件规范](https://github.com/pot-app/pot-desktop)，仅包含三个参与打包的文件：
+
+- `info.json` —— 插件声明（id、语言映射、配置字段）
+- `main.js` —— 翻译逻辑入口 `translate(text, from, to, options)`
+- `siliconflow.svg` —— 图标
+
+推送后 GitHub Actions 会自动打包 `info.json + siliconflow.svg + main.js` 为 `.potext`；打 tag（如 `v1.0.0`）时会自动发布到 Releases。
+
+本地构建：
+
+```bash
+zip plugin.com.pot-app.siliconflow.potext info.json siliconflow.svg main.js
 ```
 
-词典返回 json 示例：
+仓库外附带的 `run_tests.py` 是本地逻辑测试脚本（headless Edge 模拟 pot 的插件加载与请求，25 项断言），不影响插件打包：
 
-```json
-{
-  "pronunciations": [
-    {
-      "region": "", // 地区
-      "symbol": "", // 音标
-      "voice": [u8] // 语音字节数组
-    }
-  ],
-  "explanations": [
-    {
-      "trait": "", // 词性
-      "explains": [""] // 释义
-    }
-  ],
-  "associations": [""], // 联想/变形
-  "sentence": [
-    {
-      "source": "", // 原文
-      "target": "" // 译文
-    }
-  ]
-}
+```bash
+python run_tests.py
 ```
 
-### 4. 打包 pot 插件
+## License
 
-1. 将 `main.js` 文件和 `info.json` 以及图标文件压缩为 zip 文件。
-
-2. 将文件重命名为`<插件id>.potext`，例如`plugin.com.pot-app.lingva.potext`,即可得到 pot 需要的插件。
-
-## 自动编译打包
-
-本仓库配置了 Github Actions，可以实现推送后自动编译打包插件。
-
-每次将仓库推送到 GitHub 之后 actions 会自动运行，将打包好的插件上传到 artifact，在 actions 页面可以下载
-
-每次提交 Tag 之后，actions 会自动运行，将打包好的插件上传到 release，在 release 页面可以下载打包好的插件
+遵循上游模板的开源协议（见 [LICENSE](LICENSE)）。

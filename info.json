@@ -1,10 +1,57 @@
 {
-  "id": "plugin.com.pot-app.lingva",
+  "id": "plugin.com.pot-app.siliconflow",
   "plugin_type": "translate",
-  "icon": "lingva.svg",
-  "display": "Lingva",
-  "homepage": "https://github.com/pot-app/pot-app-translate-plugin-template",
-  "needs": [{ "key": "requestPath", "display": "请求地址" }],
+  "icon": "siliconflow.svg",
+  "display": "硅基流动 SiliconFlow",
+  "homepage": "https://github.com/LargeNumberZZ/pot-app-translate-plugin-SiliconFlow",
+  "needs": [
+    {
+      "key": "apiKey",
+      "display": "API Key",
+      "type": "input"
+    },
+    {
+      "key": "mode",
+      "display": "翻译模式",
+      "type": "select",
+      "options": {
+        "auto": "智能模式（单词/短语查词典，句子用混元直接翻译）",
+        "dual": "双模型对照（Hunyuan-MT-7B + Qwen2.5-7B）",
+        "hunyuan": "仅 tencent/Hunyuan-MT-7B",
+        "qwen": "仅 Qwen/Qwen2.5-7B-Instruct"
+      }
+    },
+    {
+      "key": "dictMode",
+      "display": "词典模式",
+      "type": "select",
+      "options": {
+        "auto": "自动判断（单词/短语/固定搭配按词典输出，句子直接翻译）",
+        "always": "总是按词典格式输出",
+        "never": "总是直接输出译文"
+      }
+    },
+    {
+      "key": "promptWord",
+      "display": "词典模式 Prompt（留空用默认）",
+      "type": "input"
+    },
+    {
+      "key": "promptSentence",
+      "display": "句子翻译 Prompt（留空用默认）",
+      "type": "input"
+    },
+    {
+      "key": "promptSystem",
+      "display": "System Prompt（留空用默认）",
+      "type": "input"
+    },
+    {
+      "key": "apiUrl",
+      "display": "API 地址（留空用官方默认）",
+      "type": "input"
+    }
+  ],
   "language": {
     "auto": "auto",
     "zh_cn": "zh",
