@@ -28,11 +28,14 @@ jobs:
           if-no-files-found: error
       - name: Prepare release body (from annotated tag message)
         if: startsWith(github.ref, 'refs/tags')
-        run: git tag -l --format='%(contents)' "${{ github.ref_name }}" > release_body.md
+        run: |
+          git fetch origin "+refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}" || true
+          git tag -l --format='%(contents)' "${{ github.ref_name }}" > release_body.md
       - name: Upload Release
         if: startsWith(github.ref, 'refs/tags')
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           body_path: release_body.md
+          generate_release_notes: true
           files: "*.potext"
