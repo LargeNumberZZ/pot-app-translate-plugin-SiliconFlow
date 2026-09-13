@@ -78,6 +78,7 @@ const DEFAULT_WORD_PROMPT = [
     '3. "associations"：屈折变化数组，逐条给出适用的变化，如 "复数 translations"、"第三人称单数 translates"、"过去式 translated"、"过去分词 translated"、"现在分词 translating"、"比较级 xxx"、"最高级 xxx"；俚语、习语或固定搭配也在此标注；这是词典的必填部分，英语词条务必认真给出；确实没有才给 []',
     '4. "sentence"：例句数组，1 个典型例句，形如 {"source": "例句原文", "target": "例句的$to译文"}。例句只放在这个字段；没有则给 []',
     '格式示例（仅演示结构，内容按实际词条填写，不要照抄示例内容）：{"pronunciations": [{"region": "us", "symbol": "/rʌn/"}, {"region": "uk", "symbol": "/rʌn/"}], "explanations": [{"trait": "v.", "explains": ["跑；奔跑", "运转；运行"]}, {"trait": "n.", "explains": ["跑步；奔跑"]}], "associations": ["第三人称单数 runs", "过去式 ran", "过去分词 run", "现在分词 running"], "sentence": [{"source": "I run every morning.", "target": "我每天早上跑步。"}]}',
+    '重要：只解释词条本身的含义，不要扩展解释相关的词组或派生词；associations 只列屈折变化和短语搭配本身，不要对它们再做解释。',
     '只输出 JSON 本身，不要输出任何其他文字。',
 ].join('\n');
 
@@ -86,22 +87,19 @@ const DEFAULT_WORD_PROMPT = [
 const DEFAULT_WORD_TEXT_PROMPT = [
     '请查询 <<< >>> 之间的词条（词条语言：$from），像一本权威双语词典一样解释，释义与例句译文使用 $to。',
     '严格按下面的行格式逐行输出（每行一条，不要 markdown、不要代码块、不要输出格式之外的话）：',
-    '英音: /英式IPA音标/',
-    '美音: /美式IPA音标/',
-    '（上面两行英语词条必填；日语词条把这两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
-    'n. 释义1；释义2；释义3',
-    '（每个词性一行，词性可用 n. v. vt. vi. adj. adv. prep. conj. 等，每词性给出 1~3 个常用释义）',
-    '复数: xxx',
-    '（屈折变化行：复数、第三人称单数、过去式、过去分词、现在分词、比较级、最高级等，各占一行，按适用给出，没有可省略）',
-    '搭配: xxx',
-    '（常用搭配或短语，可多行，没有可省略）',
-    '例句: 一句典型例句原文',
-    '译文: 上面例句的$to译文',
+    '英音: /英式IPA音标/        （英语词条必填）',
+    '美音: /美式IPA音标/        （英语词条必填；日语词条把这两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
+    'n. 释义1；释义2；释义3        （必填。每个词性一行，词性可用 n. v. vt. vi. adj. adv. prep. conj. 等，每词性 1~3 个常用释义）',
+    '复数: xxx                    （必填。屈折变化行：复数、第三人称单数、过去式、过去分词、现在分词、比较级、最高级等，各占一行，按适用给出；确实没有变化的可省略）',
+    '搭配: xxx                    （必填。至少 1 条该词条的常用搭配或短语，可附简短中文对应；确实没有的词可省略）',
+    '例句: 一句典型例句原文        （必填）',
+    '译文: 上面例句的$to译文      （必填）',
+    '重要：只解释词条本身的含义，不要联想扩展——不要解释与该词相关的词组、派生词，不要为搭配再做解释，不要为搭配单独给例句。',
     '词条：',
     '<<<',
     '$text',
     '>>>',
-    '只输出以上格式的行，不要输出任何其他内容。',
+    '除上述格式行外不要输出任何其他内容。',
 ].join('\n');
 
 // 快速翻译 Prompt（输出极短，几秒内先行展示，词典卡片随后替换）
@@ -113,7 +111,7 @@ const QUICK_TRANSLATE_PROMPT = [
 ].join('\n');
 
 const DEFAULT_SENTENCE_PROMPT = [
-    '请将下面的内容从 $from 翻译成 $to。要求：译文自然、流畅、专业、地道，符合 $to 的表达习惯，避免机翻腔；只输出译文本身，不要解释，不要重复原文。待翻译内容：',
+    '请将下面的内容从 $from 翻译成 $to。要求：译文自然、流畅、专业、地道，符合 $to 的表达习惯，避免机翻腔；直接输出纯文本译文，不要使用任何 markdown 标记（如 **、#、列表符号、代码块）；保持与原文相同的分段与换行。只输出译文本身，不要解释，不要重复原文。待翻译内容：',
     '"""',
     '$text',
     '"""',
@@ -496,6 +494,11 @@ async function translate(text, from, to, options) {
         { role: 'user', content: fillPrompt(DEFAULT_WORD_TEXT_PROMPT, text, from, to, detect) },
     ];
 
+    // 词典完整度：有释义但缺屈折变化/搭配和例句时视为不完整（模型偶发偷懒），追问补全
+    const dictScore = (d) =>
+        d ? (d.pronunciations.length > 0) + (d.explanations.length > 0) + (d.associations.length > 0) + (d.sentence.length > 0) : 0;
+    const dictNeedsRetry = (d) => !!d && d.explanations.length > 0 && !d.associations.length && !d.sentence.length;
+
     const quickMessages = [
         { role: 'system', content: messages[0].content },
         { role: 'user', content: fillPrompt(QUICK_TRANSLATE_PROMPT, text, from, to, detect) },
@@ -504,18 +507,61 @@ async function translate(text, from, to, options) {
     // 快速译文（极短输出，先行展示）
     const quickVia = (model, show) =>
         chat(model, quickMessages, 0.7, show).then((content) => content, () => '');
-    // JSON 词典（Qwen 等指令模型），解析成 pot 词典卡片
-    const jsonDictVia = (model) =>
-        chat(model).then(
+    // JSON 词典（Qwen 等指令模型），解析成 pot 词典卡片；不完整时追问一次补全
+    const jsonDictVia = async (model) => {
+        let result = await chat(model).then(
             (content) => ({ content, dict: parseDictJSON(content) }),
             () => ({ content: '', dict: null })
         );
-    // 行格式纯文本词典（输出边生成边展示，完成后解析成词典卡片；解析失败回退展示原文）
-    const textDictVia = (model, show) =>
-        chat(model, textDictMessages(), null, show).then(
+        if (dictNeedsRetry(result.dict)) {
+            const retry = await chat(
+                model,
+                [
+                    ...messages,
+                    { role: 'assistant', content: result.content },
+                    {
+                        role: 'user',
+                        content: '你上面的 JSON 缺少 associations（屈折变化/搭配）或 sentence（例句）字段。请重新输出完整、合法的 JSON：四个字段都必须按词条实际内容认真填写（没有的项才给空数组）。只输出 JSON。',
+                    },
+                ],
+                null,
+                null
+            ).then(
+                (content) => ({ content, dict: parseDictJSON(content) }),
+                () => ({ content: '', dict: null })
+            );
+            if (dictScore(retry.dict) > dictScore(result.dict)) result = retry;
+        }
+        return result;
+    };
+    // 行格式纯文本词典（输出边生成边展示，完成后解析成词典卡片；解析失败回退展示原文）；
+    // 不完整（缺屈折/搭配/例句）时追问一次补全，取更完整的结果
+    const textDictVia = async (model, show) => {
+        let result = await chat(model, textDictMessages(), null, show).then(
             (content) => ({ content, dict: parseDictText(content) }),
             () => ({ content: '', dict: null })
         );
+        if (dictNeedsRetry(result.dict)) {
+            const retry = await chat(
+                model,
+                [
+                    ...textDictMessages(),
+                    { role: 'assistant', content: result.content },
+                    {
+                        role: 'user',
+                        content: '你上面的输出缺少屈折变化、搭配或例句部分。请严格按同样的行格式重新输出该词条的完整词典内容：音标行、每个词性释义行、适用的屈折变化行、至少一条搭配行、例句行和译文行都要有。只输出这些行。',
+                    },
+                ],
+                null,
+                show
+            ).then(
+                (content) => ({ content, dict: parseDictText(content) }),
+                () => ({ content: '', dict: null })
+            );
+            if (dictScore(retry.dict) > dictScore(result.dict)) result = retry;
+        }
+        return result;
+    };
 
     // 翻译模式（词典查询的模型分工）：
     // auto     —— 混元快速译文先行 → 混元行格式词典（解析成卡片，质量优先）∥ Qwen JSON 词典（并行兜底）
