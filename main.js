@@ -146,7 +146,7 @@ const DEFAULT_WORD_DETAIL_TEXT_PROMPT = [
 ].join('\n');
 
 const DEFAULT_SENTENCE_PROMPT = [
-    '请将下面的内容从 $from 翻译成 $to。要求：译文自然、流畅、专业、地道，符合 $to 的表达习惯，避免机翻腔；直接输出纯文本译文，不要使用任何 markdown 标记（如 **、#、列表符号、代码块）；保持与原文相同的分段与换行。只输出译文本身，不要解释，不要重复原文。待翻译内容：',
+    '请将下面的内容从 $from 翻译成 $to。你只做翻译这件事，除此之外不要做任何事情：不要总结、不要改写、不要润色结构、不要自己组织语言和格式、不要添加任何 markdown 标记（如 **、#、- 列表、代码块）、不要添加标题或序号。原文是什么样，译文就是什么样：分段、换行、顺序与原文完全一致。译文要自然、流畅、专业、地道，符合 $to 的表达习惯，避免机翻腔。只输出译文本身，不要解释，不要重复原文。待翻译内容：',
     '"""',
     '$text',
     '"""',
@@ -638,7 +638,7 @@ async function translate(text, from, to, options) {
     ];
 
     const chat = (model, msgs, temp, onDelta) =>
-        requestChatStream(fetch, http, apiUrl, apiKey, model, msgs || messages, temp ?? (useDict ? 0.3 : 0.7), onDelta);
+        requestChatStream(fetch, http, apiUrl, apiKey, model, msgs || messages, temp ?? (useDict ? 0.1 : 0.7), onDelta);
 
     // 详细词典消息：千问 JSON 版（主力，质量更好）与混元行格式版（兜底）。
     // 两者都会把简明版已有的音标/词义附在消息末尾，要求模型在其基础上扩充，
@@ -732,12 +732,12 @@ async function translate(text, from, to, options) {
             // 详细释义来源链：千问 JSON -> 混元行格式
             const detailChain = (() => {
                 const viaQwen = () =>
-                    chat(MODEL_QWEN, detailJsonMessages(), 0.3, null).then(
+                    chat(MODEL_QWEN, detailJsonMessages(), 0.1, null).then(
                         (content) => ({ dict: parseDictJSON(content) }),
                         () => ({ dict: null })
                     );
                 const viaHunyuan = () =>
-                    chat(MODEL_HUNYUAN, detailTextMessages(), 0.3, null).then(
+                    chat(MODEL_HUNYUAN, detailTextMessages(), 0.1, null).then(
                         (content) => ({ dict: parseDictText(content) }),
                         () => ({ dict: null })
                     );
@@ -877,13 +877,12 @@ async function translate(text, from, to, options) {
                 return v;
             };
             const finishCard = (d) => finish(withDetailButton(d));
-            const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
-            const qwenP = jsonDictVia(MODEL_QWEN);
-            const hun = await hunyuanP;
-            const qwen = await qwenP;
-            if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finishCard(hun.dict);
+            // 千问 JSON 简明词典优先（词性准确）；混元行格式兜底（流式展示）
+            const qwen = await jsonDictVia(MODEL_QWEN);
             if (qwen.dict) return finishCard(qwen.dict);
+            const hun = await textDictVia(MODEL_HUNYUAN, show);
             if (hun.dict) return finishCard(hun.dict);
+            if (hun.content) return finish(hun.content);
             const qwenText = await textDictVia(MODEL_QWEN, show);
             if (qwenText.dict) return finishCard(qwenText.dict);
             if (qwenText.content) return finish(qwenText.content);
@@ -939,8 +938,8 @@ async function translate(text, from, to, options) {
     }
 
     if (mode === 'auto' && useDict) {
-        // 智能模式查词：Qwen JSON 词典并行提前发出；混元快速译文先行（1~2 秒），
-        // 随后混元行格式词典（质量更好）流式展示并解析成卡片
+        // 智能模式查词：千问 JSON 简明词典优先（词性准确）；混元快速译文先行展示（1~2 秒），
+        // 千问失败时混元行格式词典兜底（流式展示）
         let live = true;
         const show = (v) => {
             if (live && setResult) setResult(v);
@@ -950,14 +949,13 @@ async function translate(text, from, to, options) {
             return v;
         };
         const finishCard = (d) => finish(withDetailButton(d));
-        const qwenP = jsonDictVia(MODEL_QWEN);
-        const quick = await quickVia(MODEL_HUNYUAN, show);
-        const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
-        const hun = await hunyuanP;
-        const qwen = await qwenP;
-        if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finishCard(hun.dict);
+        const qwenP = jsonDictVia(MODEL_QWEN);               // 千问 JSON 简明词典（主力）并行发出
+        const quick = await quickVia(MODEL_HUNYUAN, show);   // 混元快速译文先行展示（1~2 秒）
+        const qwen = await qwenP;                            // 千问简明词典就绪
         if (qwen.dict) return finishCard(qwen.dict);
+        const hun = await textDictVia(MODEL_HUNYUAN, show);  // 混元行格式兜底（流式展示）
         if (hun.dict) return finishCard(hun.dict);
+        if (hun.content) return finish(hun.content);
         const qwenText = await textDictVia(MODEL_QWEN, show);
         if (qwenText.dict) return finishCard(qwenText.dict);
         if (qwenText.content) return finish(qwenText.content);
@@ -968,7 +966,6 @@ async function translate(text, from, to, options) {
 
     let model = MODEL_QWEN;
     if (mode === 'hunyuan') model = MODEL_HUNYUAN;
-    else if (mode === 'auto') model = MODEL_HUNYUAN; // auto 且非词典（句子）
 
     if (useDict) {
         // 单模型模式：快速译文、词典全部由同一个模型输出（串行，避免同模型并发受限）
@@ -996,6 +993,19 @@ async function translate(text, from, to, options) {
         }
         if (quick) return finish(quick);
         throw '词典查询失败：请检查 API Key、网络或稍后重试';
+    }
+
+    if (mode === 'auto') {
+        // 智能模式句子：混元优先（意译自然、翻译特调），千问兜底
+        try {
+            return await chat(MODEL_HUNYUAN, null, null, (v) => setResult && setResult(v));
+        } catch (e) {
+            try {
+                return await chat(MODEL_QWEN, null, null, (v) => setResult && setResult(v));
+            } catch (e2) {
+                throw `句子翻译失败（混元与千问均不可用）\n混元: ${String(e)}\n千问: ${String(e2)}`;
+            }
+        }
     }
 
     return await chat(model, null, null, (v) => setResult && setResult(v));
