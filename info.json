@@ -15,7 +15,7 @@
       "display": "翻译模式",
       "type": "select",
       "options": {
-        "auto": "千问优先，混元兜底（默认）",
+        "auto": "默认模式",
         "dual": "双模型对照",
         "hunyuan": "仅混元",
         "qwen": "仅千问"
