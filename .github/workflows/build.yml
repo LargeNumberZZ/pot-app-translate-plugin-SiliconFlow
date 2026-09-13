@@ -26,9 +26,13 @@ jobs:
           name: ${{ env.NAME }}.potext
           path: "*.potext"
           if-no-files-found: error
+      - name: Prepare release body (from annotated tag message)
+        if: startsWith(github.ref, 'refs/tags')
+        run: git tag -l --format='%(contents)' "${{ github.ref_name }}" > release_body.md
       - name: Upload Release
         if: startsWith(github.ref, 'refs/tags')
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          body_path: release_body.md
           files: "*.potext"
