@@ -78,28 +78,29 @@ const DEFAULT_WORD_PROMPT = [
     '3. "associations"：屈折变化数组，逐条给出适用的变化，如 "复数 translations"、"第三人称单数 translates"、"过去式 translated"、"过去分词 translated"、"现在分词 translating"、"比较级 xxx"、"最高级 xxx"；俚语、习语或固定搭配也在此标注；这是词典的必填部分，英语词条务必认真给出；确实没有才给 []',
     '4. "sentence"：例句数组，1 个典型例句，形如 {"source": "例句原文", "target": "例句的$to译文"}。例句只放在这个字段；没有则给 []',
     '格式示例（仅演示结构，内容按实际词条填写，不要照抄示例内容）：{"pronunciations": [{"region": "us", "symbol": "/rʌn/"}, {"region": "uk", "symbol": "/rʌn/"}], "explanations": [{"trait": "v.", "explains": ["跑；奔跑", "运转；运行"]}, {"trait": "n.", "explains": ["跑步；奔跑"]}], "associations": ["第三人称单数 runs", "过去式 ran", "过去分词 run", "现在分词 running"], "sentence": [{"source": "I run every morning.", "target": "我每天早上跑步。"}]}',
-    '重要：只解释词条本身的含义，不要扩展解释相关的词组或派生词；associations 只列屈折变化和短语搭配本身，不要对它们再做解释。',
+    '重要：只解释词条本身的含义，不要解释与该词相关的词组、派生词，不要为搭配再做解释；每个字段只输出一次，严禁重复输出相同的音标、释义或字段。',
     '只输出 JSON 本身，不要输出任何其他文字。',
 ].join('\n');
 
 // 行格式纯文本词典 Prompt（混元主用，也作为 JSON 词典失败时的兜底）：
-// 混元等模型对纯文本的遵循度远好于 JSON，输出由插件解析成 pot 词典卡片
+// 混元等模型对纯文本的遵循度远好于 JSON，输出由插件解析成 pot 词典卡片。
+// 一次性给出最严格的单次输出要求（行数上限 + 禁止重复 + 禁止联想），不做二次追问
 const DEFAULT_WORD_TEXT_PROMPT = [
     '请查询 <<< >>> 之间的词条（词条语言：$from），像一本权威双语词典一样解释，释义与例句译文使用 $to。',
-    '严格按下面的行格式逐行输出（每行一条，不要 markdown、不要代码块、不要输出格式之外的话）：',
-    '英音: /英式IPA音标/        （英语词条必填）',
-    '美音: /美式IPA音标/        （英语词条必填；日语词条把这两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
-    'n. 释义1；释义2；释义3        （必填。每个词性一行，词性可用 n. v. vt. vi. adj. adv. prep. conj. 等，每词性 1~3 个常用释义）',
-    '复数: xxx                    （必填。屈折变化行：复数、第三人称单数、过去式、过去分词、现在分词、比较级、最高级等，各占一行，按适用给出；确实没有变化的可省略）',
-    '搭配: xxx                    （必填。至少 1 条该词条的常用搭配或短语，可附简短中文对应；确实没有的词可省略）',
-    '例句: 一句典型例句原文        （必填）',
-    '译文: 上面例句的$to译文      （必填）',
-    '重要：只解释词条本身的含义，不要联想扩展——不要解释与该词相关的词组、派生词，不要为搭配再做解释，不要为搭配单独给例句。',
+    '严格按下面的顺序和格式输出，每种行只允许出现一次，禁止重复任何行；不要 markdown、不要代码块、不要输出格式之外的话；输出完译文行后立即停止：',
+    '英音: /英式IPA音标/        （只 1 行；日语词条把英音美音两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
+    '美音: /美式IPA音标/        （只 1 行）',
+    '词性. 释义1；释义2；释义3   （1~3 行，每个词性只占一行，每行 1~3 个常用释义，用中文分号分隔）',
+    '复数: xxx                  （0~4 行：屈折变化按适用给出——复数/第三人称单数/过去式/过去分词/现在分词/比较级/最高级；没有就一行都不写）',
+    '搭配: xxx                  （0~2 行：该词条的常用搭配短语，可附简短中文对应；没有就一行都不写）',
+    '例句: 一句典型例句原文      （只 1 行）',
+    '译文: 上面例句的$to译文    （只 1 行，写完立即停止）',
+    '重要：只解释词条本身的含义，不要解释与该词相关的词组、派生词，不要为搭配再做解释或给例句。',
     '词条：',
     '<<<',
     '$text',
     '>>>',
-    '除上述格式行外不要输出任何其他内容。',
+    '只输出上述格式的行。',
 ].join('\n');
 
 // 快速翻译 Prompt（输出极短，几秒内先行展示，词典卡片随后替换）
@@ -329,6 +330,12 @@ function parseDictJSON(raw) {
     }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
 
+    // 去重：同一地区只保留第一条音标、同一词性只保留第一条释义（小模型偶发复读）
+    const seenRegion = new Set();
+    const seenTrait = new Set();
+    const seenAssoc = new Set();
+    const seenSource = new Set();
+
     const dict = {};
     dict.pronunciations = (Array.isArray(obj.pronunciations) ? obj.pronunciations : [])
         .map((p) =>
@@ -339,7 +346,11 @@ function parseDictJSON(raw) {
                   }
                 : null
         )
-        .filter((p) => p && p.symbol !== '');
+        .filter((p) => {
+            if (!p || p.symbol === '' || seenRegion.has(p.region)) return false;
+            seenRegion.add(p.region);
+            return true;
+        });
     dict.explanations = (Array.isArray(obj.explanations) ? obj.explanations : [])
         .map((e) =>
             e && typeof e === 'object' && Array.isArray(e.explains)
@@ -349,10 +360,16 @@ function parseDictJSON(raw) {
                   }
                 : null
         )
-        .filter((e) => e && e.explains.length > 0);
-    dict.associations = (Array.isArray(obj.associations) ? obj.associations : []).filter(
-        (a) => typeof a === 'string' && a.trim() !== ''
-    );
+        .filter((e) => {
+            if (!e || e.explains.length === 0 || seenTrait.has(e.trait)) return false;
+            seenTrait.add(e.trait);
+            return true;
+        });
+    dict.associations = (Array.isArray(obj.associations) ? obj.associations : []).filter((a) => {
+        if (typeof a !== 'string' || a.trim() === '' || seenAssoc.has(a)) return false;
+        seenAssoc.add(a);
+        return true;
+    });
     dict.sentence = (Array.isArray(obj.sentence) ? obj.sentence : [])
         .map((x) =>
             x && typeof x === 'object'
@@ -362,12 +379,17 @@ function parseDictJSON(raw) {
                   }
                 : null
         )
-        .filter((x) => x && x.source !== '' && x.target !== '');
+        .filter((x) => {
+            if (!x || x.source === '' || x.target === '' || seenSource.has(x.source)) return false;
+            seenSource.add(x.source);
+            return true;
+        });
 
     return Object.values(dict).some((arr) => arr.length > 0) ? dict : null;
 }
 
 // 把按行格式输出的纯文本词典解析为 pot 词典结构（混元等模型的纯文本输出质量高）；
+// 对重复的音标/词性/联想/例句去重（小模型偶发复读），译文完成后停止解析；
 // 解析不出有效字段时返回 null（调用方回退展示原文）
 function parseDictText(raw) {
     if (typeof raw !== 'string' || !raw.trim()) return null;
@@ -376,30 +398,57 @@ function parseDictText(raw) {
         .map((l) => l.replace(/^\s*[-*•·]\s*/, '').trim())
         .filter(Boolean);
     const dict = { pronunciations: [], explanations: [], associations: [], sentence: [] };
+    const seenRegion = new Set();
+    const seenTrait = new Set();
+    const seenAssoc = new Set();
+    const seenSource = new Set();
     let curSource = '';
     let pending = null; // 'source' | 'target' —— 例句/译文为悬空标题行时承接下一行
+    let done = false; // 译文（格式的最后一行）完成后忽略剩余内容
     const posRe = /^(n|v|vt|vi|adj|adv|prep|conj|pron|int|art|num|aux|abbr)\s*\.\s*/i;
     const inflRe = /^(复数|单数|第三人称单数|过去式|过去分词|现在分词|比较级|最高级|词形变化|屈折变化?)\s*[:：]?\s*(.*)$/;
 
     for (const line of lines) {
+        if (done) break;
         let m;
         // 一行同时给英/美音的情况：如 “英 /həˈləʊ/ 美 /həˈloʊ/”
         if ((m = line.match(/^(?:英音?|英式)\s*[:：]?\s*(\/[^/]+\/)\s*[,，;；]?\s*(?:美音?|美式)\s*[:：]?\s*(\/[^/]+\/)\s*$/i))) {
-            dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
-            dict.pronunciations.push({ region: 'us', symbol: m[2].trim() });
+            if (!seenRegion.has('uk')) {
+                dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
+                seenRegion.add('uk');
+            }
+            if (!seenRegion.has('us')) {
+                dict.pronunciations.push({ region: 'us', symbol: m[2].trim() });
+                seenRegion.add('us');
+            }
         } else if ((m = line.match(/^(?:音标\s*)?(?:英音|英式|英|uk)\s*[:：]?\s*(.+)$/i))) {
-            dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
+            if (!seenRegion.has('uk')) {
+                dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
+                seenRegion.add('uk');
+            }
         } else if ((m = line.match(/^(?:音标\s*)?(?:美音|美式|美|us)\s*[:：]?\s*(.+)$/i))) {
-            dict.pronunciations.push({ region: 'us', symbol: m[1].trim() });
+            if (!seenRegion.has('us')) {
+                dict.pronunciations.push({ region: 'us', symbol: m[1].trim() });
+                seenRegion.add('us');
+            }
         } else if ((m = line.match(/^(?:假名|拼音|读音)\s*[:：]\s*(.+)$/))) {
-            dict.pronunciations.push({ region: '', symbol: m[1].trim() });
+            if (!seenRegion.has('')) {
+                dict.pronunciations.push({ region: '', symbol: m[1].trim() });
+                seenRegion.add('');
+            }
         } else if ((m = line.match(posRe))) {
-            const explains = line
-                .slice(m[0].length)
-                .split(/[；;]/)
-                .map((s) => s.trim())
-                .filter(Boolean);
-            if (explains.length) dict.explanations.push({ trait: m[1].toLowerCase() + '.', explains });
+            const trait = m[1].toLowerCase() + '.';
+            if (!seenTrait.has(trait)) {
+                const explains = line
+                    .slice(m[0].length)
+                    .split(/[；;]/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                if (explains.length) {
+                    dict.explanations.push({ trait, explains });
+                    seenTrait.add(trait);
+                }
+            }
         } else if ((m = line.match(inflRe))) {
             const value = (m[2] || '').trim();
             if (value) {
@@ -407,14 +456,23 @@ function parseDictText(raw) {
                     .split(/[；;]/)
                     .map((x) => x.trim())
                     .filter(Boolean)
-                    .forEach((item) => dict.associations.push(m[1] + ' ' + item));
+                    .forEach((item) => {
+                        const key = m[1] + ' ' + item;
+                        if (!seenAssoc.has(key) && dict.associations.length < 10) {
+                            seenAssoc.add(key);
+                            dict.associations.push(key);
+                        }
+                    });
             }
         } else if ((m = line.match(/^(?:常用搭配|搭配短语|固定搭配|搭配|短语|用法)\s*[:：]?\s*(.*)$/))) {
             const body = (m[1] || '').trim();
             if (body) {
                 body.split(/[；;]/).forEach((x) => {
                     const item = x.trim();
-                    if (item && dict.associations.length < 10) dict.associations.push(item);
+                    if (item && !seenAssoc.has(item) && dict.associations.length < 10) {
+                        seenAssoc.add(item);
+                        dict.associations.push(item);
+                    }
                 });
             }
         } else if ((m = line.match(/^(?:例句|例)\s*[:：]?\s*(.*)$/))) {
@@ -427,25 +485,30 @@ function parseDictText(raw) {
             }
         } else if ((m = line.match(/^(?:译文|翻译)\s*[:：]?\s*(.*)$/))) {
             const body = (m[1] || '').trim();
-            if (curSource && body) {
+            if (curSource && body && !seenSource.has(curSource)) {
+                seenSource.add(curSource);
                 dict.sentence.push({ source: curSource, target: body });
-                pending = null;
-            } else if (!body) {
-                pending = 'target';
-            } else {
-                pending = null;
             }
             curSource = '';
+            pending = null;
+            if (body) done = true; // 译文是格式的最后一行
         } else if (pending === 'source') {
             curSource = line;
             pending = 'target';
         } else if (pending === 'target') {
-            if (curSource) dict.sentence.push({ source: curSource, target: line });
+            if (curSource && !seenSource.has(curSource)) {
+                seenSource.add(curSource);
+                dict.sentence.push({ source: curSource, target: line });
+                done = true;
+            }
             curSource = '';
             pending = null;
         } else if (dict.associations.length < 10) {
             // 其余非空行（未带标题的搭配、注释等）收进 associations
-            dict.associations.push(line);
+            if (!seenAssoc.has(line)) {
+                seenAssoc.add(line);
+                dict.associations.push(line);
+            }
         }
     }
 
@@ -494,11 +557,6 @@ async function translate(text, from, to, options) {
         { role: 'user', content: fillPrompt(DEFAULT_WORD_TEXT_PROMPT, text, from, to, detect) },
     ];
 
-    // 词典完整度：有释义但缺屈折变化/搭配和例句时视为不完整（模型偶发偷懒），追问补全
-    const dictScore = (d) =>
-        d ? (d.pronunciations.length > 0) + (d.explanations.length > 0) + (d.associations.length > 0) + (d.sentence.length > 0) : 0;
-    const dictNeedsRetry = (d) => !!d && d.explanations.length > 0 && !d.associations.length && !d.sentence.length;
-
     const quickMessages = [
         { role: 'system', content: messages[0].content },
         { role: 'user', content: fillPrompt(QUICK_TRANSLATE_PROMPT, text, from, to, detect) },
@@ -507,61 +565,18 @@ async function translate(text, from, to, options) {
     // 快速译文（极短输出，先行展示）
     const quickVia = (model, show) =>
         chat(model, quickMessages, 0.7, show).then((content) => content, () => '');
-    // JSON 词典（Qwen 等指令模型），解析成 pot 词典卡片；不完整时追问一次补全
-    const jsonDictVia = async (model) => {
-        let result = await chat(model).then(
+    // JSON 词典（Qwen 等指令模型），解析成 pot 词典卡片
+    const jsonDictVia = (model) =>
+        chat(model).then(
             (content) => ({ content, dict: parseDictJSON(content) }),
             () => ({ content: '', dict: null })
         );
-        if (dictNeedsRetry(result.dict)) {
-            const retry = await chat(
-                model,
-                [
-                    ...messages,
-                    { role: 'assistant', content: result.content },
-                    {
-                        role: 'user',
-                        content: '你上面的 JSON 缺少 associations（屈折变化/搭配）或 sentence（例句）字段。请重新输出完整、合法的 JSON：四个字段都必须按词条实际内容认真填写（没有的项才给空数组）。只输出 JSON。',
-                    },
-                ],
-                null,
-                null
-            ).then(
-                (content) => ({ content, dict: parseDictJSON(content) }),
-                () => ({ content: '', dict: null })
-            );
-            if (dictScore(retry.dict) > dictScore(result.dict)) result = retry;
-        }
-        return result;
-    };
-    // 行格式纯文本词典（输出边生成边展示，完成后解析成词典卡片；解析失败回退展示原文）；
-    // 不完整（缺屈折/搭配/例句）时追问一次补全，取更完整的结果
-    const textDictVia = async (model, show) => {
-        let result = await chat(model, textDictMessages(), null, show).then(
+    // 行格式纯文本词典（输出边生成边展示，完成后解析成词典卡片；解析失败回退展示原文）
+    const textDictVia = (model, show) =>
+        chat(model, textDictMessages(), null, show).then(
             (content) => ({ content, dict: parseDictText(content) }),
             () => ({ content: '', dict: null })
         );
-        if (dictNeedsRetry(result.dict)) {
-            const retry = await chat(
-                model,
-                [
-                    ...textDictMessages(),
-                    { role: 'assistant', content: result.content },
-                    {
-                        role: 'user',
-                        content: '你上面的输出缺少屈折变化、搭配或例句部分。请严格按同样的行格式重新输出该词条的完整词典内容：音标行、每个词性释义行、适用的屈折变化行、至少一条搭配行、例句行和译文行都要有。只输出这些行。',
-                    },
-                ],
-                null,
-                show
-            ).then(
-                (content) => ({ content, dict: parseDictText(content) }),
-                () => ({ content: '', dict: null })
-            );
-            if (dictScore(retry.dict) > dictScore(result.dict)) result = retry;
-        }
-        return result;
-    };
 
     // 翻译模式（词典查询的模型分工）：
     // auto     —— 混元快速译文先行 → 混元行格式词典（解析成卡片，质量优先）∥ Qwen JSON 词典（并行兜底）
