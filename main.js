@@ -111,6 +111,28 @@ const QUICK_TRANSLATE_PROMPT = [
     '>>>',
 ].join('\n');
 
+// 详细词典 Prompt（点击卡片上的“详细解释”按钮时使用，比默认简明卡片更详尽）
+const DEFAULT_WORD_DETAIL_PROMPT = [
+    '请查询 <<< >>> 之间的词条（词条语言：$from），像一本详尽的双语词典一样给出详细解释，释义与例句译文使用 $to。',
+    '严格按下面的行格式输出（每行一条，不要 markdown、不要代码块、每种行不要重复）：',
+    '英音: /英式IPA音标/        （英语词条必填，只给一个音标；日语给假名；中文给拼音）',
+    '美音: /美式IPA音标/        （英语词条必填，只给一个音标）',
+    '词性. 释义1；释义2；释义3；释义4        （3~5 行，每词性 2~4 个释义，包含常见引申义）',
+    '复数: xxx                              （屈折变化：复数/第三人称单数/过去式/过去分词/现在分词/比较级/最高级等，各占一行，按适用给出）',
+    '搭配: xxx                              （3~5 条常用搭配或短语，可附简短中文对应）',
+    '近义词: xxx；xxx                       （近义词或反义词，没有可省略）',
+    '用法: 一条简短的用法说明或辨析          （如正式/口语、可数性、常见语法结构等，没有可省略）',
+    '例句: 典型例句原文',
+    '译文: 上面例句的$to译文',
+    '例句: 另一句典型例句原文',
+    '译文: 另一句例句的$to译文',
+    '词条：',
+    '<<<',
+    '$text',
+    '>>>',
+    '只解释词条本身的含义，不要解释词条之外的词组或派生词。只输出上述格式的行。',
+].join('\n');
+
 const DEFAULT_SENTENCE_PROMPT = [
     '请将下面的内容从 $from 翻译成 $to。要求：译文自然、流畅、专业、地道，符合 $to 的表达习惯，避免机翻腔；直接输出纯文本译文，不要使用任何 markdown 标记（如 **、#、列表符号、代码块）；保持与原文相同的分段与换行。只输出译文本身，不要解释，不要重复原文。待翻译内容：',
     '"""',
@@ -494,7 +516,13 @@ function parseDictText(raw) {
                         }
                     });
             }
-        } else if ((m = line.match(/^(?:常用搭配|搭配短语|固定搭配|搭配|短语|用法)\s*[:：]?\s*(.*)$/))) {
+        } else if ((m = line.match(/^(近义词|反义词|用法|辨析|备注|注意)\s*[:：]\s*(.+)$/))) {
+            // 说明性信息整行保留（带标签），进入 associations
+            if (!seenAssoc.has(line) && dict.associations.length < 10) {
+                seenAssoc.add(line);
+                dict.associations.push(line);
+            }
+        } else if ((m = line.match(/^(?:常用搭配|搭配短语|固定搭配|搭配|短语)\s*[:：]?\s*(.*)$/))) {
             const body = (m[1] || '').trim();
             if (body) {
                 body.split(/[；;]/).forEach((x) => {
@@ -584,6 +612,83 @@ async function translate(text, from, to, options) {
         { role: 'system', content: messages[0].content },
         { role: 'user', content: fillPrompt(DEFAULT_WORD_TEXT_PROMPT, text, from, to, detect) },
     ];
+    // 详细词典消息（点击卡片上的“详细解释”按钮时使用）
+    const detailDictMessages = () => [
+        { role: 'system', content: messages[0].content },
+        { role: 'user', content: fillPrompt(DEFAULT_WORD_DETAIL_PROMPT, text, from, to, detect) },
+    ];
+
+    // 给词典卡片附加“详细解释”按钮：
+    // pot 渲染词典卡片的例句字段时允许内联 HTML，可以嵌入链接；
+    // 点击时调用注册在 window 上的处理函数（闭包内持有 setResult 与网络工具），
+    // 原地加载更详细的解释并替换卡片，可随时切回简明版（简明/详细两版都缓存，切换不发请求）。
+    // 任何失败都回退展示原卡片；新翻译开始后 pot 会自动忽略过期的 setResult。
+    const detailModelFor = mode === 'qwen' ? MODEL_QWEN : MODEL_HUNYUAN;
+    const withDetailButton = (simpleDict) => {
+        try {
+            if (!simpleDict || typeof simpleDict !== 'object') return simpleDict;
+            const nonce = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+            const detailName = '__potSFd' + nonce;
+            const simpleName = '__potSFs' + nonce;
+            let detail = null;
+            let busy = false;
+            // 注册表：限制 window 上残留的处理函数数量
+            const regKey = '__potSFregistry';
+            const reg = (window[regKey] = window[regKey] || []);
+            reg.push(detailName, simpleName);
+            while (reg.length > 40) {
+                const old = reg.shift();
+                try {
+                    delete window[old];
+                } catch {
+                    // 忽略
+                }
+            }
+            const link = (label, fnName) =>
+                `<a href="javascript:void(0)" onclick="window.${fnName} && window.${fnName}()" style="color:#7a7a7a;cursor:pointer;">${label}</a>`;
+            const simpleView = () => {
+                const c = JSON.parse(JSON.stringify(simpleDict));
+                c.sentence = c.sentence || [];
+                c.sentence.push({ source: link('详细解释', detailName), target: '' });
+                return c;
+            };
+            const detailView = () => {
+                const c = JSON.parse(JSON.stringify(detail));
+                c.sentence = c.sentence || [];
+                c.sentence.push({ source: link('◂ 返回简明版', simpleName), target: '' });
+                return c;
+            };
+            window[detailName] = async () => {
+                if (busy) return;
+                if (detail) {
+                    if (setResult) setResult(detailView());
+                    return;
+                }
+                busy = true;
+                try {
+                    const loading = JSON.parse(JSON.stringify(simpleDict));
+                    loading.associations = [...(loading.associations || []).slice(0, 9), '⏳ 正在获取详细解释…'];
+                    if (setResult) setResult(loading);
+                    const content = await chat(detailModelFor, detailDictMessages(), 0.3, null);
+                    const parsed = parseDictText(content);
+                    if (!parsed) throw new Error('empty detail');
+                    detail = parsed;
+                    if (setResult) setResult(detailView());
+                } catch (e) {
+                    const errCard = JSON.parse(JSON.stringify(simpleDict));
+                    errCard.associations = [...(errCard.associations || []).slice(0, 9), '⚠️ 详细解释获取失败，请稍后重试'];
+                    if (setResult) setResult(errCard);
+                }
+                busy = false;
+            };
+            window[simpleName] = () => {
+                if (setResult) setResult(simpleView());
+            };
+            return simpleView();
+        } catch (e) {
+            return simpleDict; // 附加按钮失败不影响原卡片
+        }
+    };
 
     const quickMessages = [
         { role: 'system', content: messages[0].content },
@@ -623,15 +728,16 @@ async function translate(text, from, to, options) {
                 live = false;
                 return v;
             };
+            const finishCard = (d) => finish(withDetailButton(d));
             const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
             const qwenP = jsonDictVia(MODEL_QWEN);
             const hun = await hunyuanP;
             const qwen = await qwenP;
-            if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finish(hun.dict);
-            if (qwen.dict) return finish(qwen.dict);
-            if (hun.dict) return finish(hun.dict);
+            if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finishCard(hun.dict);
+            if (qwen.dict) return finishCard(qwen.dict);
+            if (hun.dict) return finishCard(hun.dict);
             const qwenText = await textDictVia(MODEL_QWEN, show);
-            if (qwenText.dict) return finish(qwenText.dict);
+            if (qwenText.dict) return finishCard(qwenText.dict);
             if (qwenText.content) return finish(qwenText.content);
             if (hun.content) return finish(hun.content);
             throw '词典查询失败（两个模型均未返回有效结果）：请检查 API Key、网络或稍后重试';
@@ -695,16 +801,17 @@ async function translate(text, from, to, options) {
             live = false;
             return v;
         };
+        const finishCard = (d) => finish(withDetailButton(d));
         const qwenP = jsonDictVia(MODEL_QWEN);
         const quick = await quickVia(MODEL_HUNYUAN, show);
         const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
         const hun = await hunyuanP;
         const qwen = await qwenP;
-        if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finish(hun.dict);
-        if (qwen.dict) return finish(qwen.dict);
-        if (hun.dict) return finish(hun.dict);
+        if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finishCard(hun.dict);
+        if (qwen.dict) return finishCard(qwen.dict);
+        if (hun.dict) return finishCard(hun.dict);
         const qwenText = await textDictVia(MODEL_QWEN, show);
-        if (qwenText.dict) return finish(qwenText.dict);
+        if (qwenText.dict) return finishCard(qwenText.dict);
         if (qwenText.content) return finish(qwenText.content);
         if (hun.content) return finish(hun.content);
         if (quick) return finish(quick);
@@ -725,17 +832,18 @@ async function translate(text, from, to, options) {
             live = false;
             return v;
         };
+        const finishCard = (d) => finish(withDetailButton(d));
         const quick = await quickVia(model, show);
         if (model === MODEL_HUNYUAN) {
             // 混元：直接行格式纯文本词典（解析成卡片），不尝试 JSON
             const hun = await textDictVia(model, show);
-            if (hun.dict) return finish(hun.dict);
+            if (hun.dict) return finishCard(hun.dict);
             if (hun.content) return finish(hun.content);
         } else {
             const qj = await jsonDictVia(model);
-            if (qj.dict) return finish(qj.dict);
+            if (qj.dict) return finishCard(qj.dict);
             const qt = await textDictVia(model, show);
-            if (qt.dict) return finish(qt.dict);
+            if (qt.dict) return finishCard(qt.dict);
             if (qt.content) return finish(qt.content);
         }
         if (quick) return finish(quick);
