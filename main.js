@@ -88,8 +88,8 @@ const DEFAULT_WORD_PROMPT = [
 const DEFAULT_WORD_TEXT_PROMPT = [
     '请查询 <<< >>> 之间的词条（词条语言：$from），像一本权威双语词典一样解释，释义与例句译文使用 $to。',
     '严格按下面的顺序和格式输出，每种行只允许出现一次，禁止重复任何行；不要 markdown、不要代码块、不要输出格式之外的话；输出完译文行后立即停止：',
-    '英音: /英式IPA音标/        （只 1 行；日语词条把英音美音两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
-    '美音: /美式IPA音标/        （只 1 行）',
+    '英音: /英式IPA音标/        （只 1 行、每行只给一个音标；日语词条把这两行换成一行 假名: 读音；中文词条换成一行 拼音: 拼音）',
+    '美音: /美式IPA音标/        （只 1 行、每行只给一个音标）',
     '词性. 释义1；释义2；释义3   （1~3 行，每个词性只占一行，每行 1~3 个常用释义，用中文分号分隔）',
     '复数: xxx                  （0~4 行：屈折变化按适用给出——复数/第三人称单数/过去式/过去分词/现在分词/比较级/最高级；没有就一行都不写）',
     '搭配: xxx                  （0~2 行：该词条的常用搭配短语，可附简短中文对应；没有就一行都不写）',
@@ -370,6 +370,7 @@ function parseDictJSON(raw) {
         seenAssoc.add(a);
         return true;
     });
+    dict.associations = dict.associations.slice(0, 10);
     dict.sentence = (Array.isArray(obj.sentence) ? obj.sentence : [])
         .map((x) =>
             x && typeof x === 'object'
@@ -384,12 +385,13 @@ function parseDictJSON(raw) {
             seenSource.add(x.source);
             return true;
         });
+    dict.sentence = dict.sentence.slice(0, 3);
 
     return Object.values(dict).some((arr) => arr.length > 0) ? dict : null;
 }
 
 // 把按行格式输出的纯文本词典解析为 pot 词典结构（混元等模型的纯文本输出质量高）；
-// 对重复的音标/词性/联想/例句去重（小模型偶发复读），译文完成后停止解析；
+// 对重复的音标/词性/联想/例句去重（小模型偶发复读），并容忍行序偏差（词义行可能在例句之后）；
 // 解析不出有效字段时返回 null（调用方回退展示原文）
 function parseDictText(raw) {
     if (typeof raw !== 'string' || !raw.trim()) return null;
@@ -404,12 +406,17 @@ function parseDictText(raw) {
     const seenSource = new Set();
     let curSource = '';
     let pending = null; // 'source' | 'target' —— 例句/译文为悬空标题行时承接下一行
-    let done = false; // 译文（格式的最后一行）完成后忽略剩余内容
     const posRe = /^(n|v|vt|vi|adj|adv|prep|conj|pron|int|art|num|aux|abbr)\s*\.\s*/i;
+    const cnPosRe = /^(名词|动词|形容词|副词|介词|代词|连词|感叹词|及物动词|不及物动词)\s*[.、:：]?\s*(.*)$/;
+    const CN_POS = { 名词: 'n.', 动词: 'v.', 形容词: 'adj.', 副词: 'adv.', 介词: 'prep.', 代词: 'pron.', 连词: 'conj.', 感叹词: 'int.', 及物动词: 'vt.', 不及物动词: 'vi.' };
     const inflRe = /^(复数|单数|第三人称单数|过去式|过去分词|现在分词|比较级|最高级|词形变化|屈折变化?)\s*[:：]?\s*(.*)$/;
+    // 音标行只取第一个 /.../（模型偶尔把英美两个音标挤进一行）
+    const firstIpa = (s) => {
+        const m = s.match(/\/[^/]+\//);
+        return m ? m[0] : s.trim();
+    };
 
     for (const line of lines) {
-        if (done) break;
         let m;
         // 一行同时给英/美音的情况：如 “英 /həˈləʊ/ 美 /həˈloʊ/”
         if ((m = line.match(/^(?:英音?|英式)\s*[:：]?\s*(\/[^/]+\/)\s*[,，;；]?\s*(?:美音?|美式)\s*[:：]?\s*(\/[^/]+\/)\s*$/i))) {
@@ -423,12 +430,12 @@ function parseDictText(raw) {
             }
         } else if ((m = line.match(/^(?:音标\s*)?(?:英音|英式|英|uk)\s*[:：]?\s*(.+)$/i))) {
             if (!seenRegion.has('uk')) {
-                dict.pronunciations.push({ region: 'uk', symbol: m[1].trim() });
+                dict.pronunciations.push({ region: 'uk', symbol: firstIpa(m[1]) });
                 seenRegion.add('uk');
             }
         } else if ((m = line.match(/^(?:音标\s*)?(?:美音|美式|美|us)\s*[:：]?\s*(.+)$/i))) {
             if (!seenRegion.has('us')) {
-                dict.pronunciations.push({ region: 'us', symbol: m[1].trim() });
+                dict.pronunciations.push({ region: 'us', symbol: firstIpa(m[1]) });
                 seenRegion.add('us');
             }
         } else if ((m = line.match(/^(?:假名|拼音|读音)\s*[:：]\s*(.+)$/))) {
@@ -447,6 +454,29 @@ function parseDictText(raw) {
                 if (explains.length) {
                     dict.explanations.push({ trait, explains });
                     seenTrait.add(trait);
+                }
+            }
+        } else if ((m = line.match(cnPosRe))) {
+            const trait = CN_POS[m[1]];
+            if (!seenTrait.has(trait)) {
+                const explains = (m[2] || '')
+                    .split(/[；;]/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                if (explains.length) {
+                    dict.explanations.push({ trait, explains });
+                    seenTrait.add(trait);
+                }
+            }
+        } else if ((m = line.match(/^释义\s*[:：]\s*(.+)$/))) {
+            if (!seenTrait.has('')) {
+                const explains = m[1]
+                    .split(/[；;]/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                if (explains.length) {
+                    dict.explanations.push({ trait: '', explains });
+                    seenTrait.add('');
                 }
             }
         } else if ((m = line.match(inflRe))) {
@@ -485,21 +515,19 @@ function parseDictText(raw) {
             }
         } else if ((m = line.match(/^(?:译文|翻译)\s*[:：]?\s*(.*)$/))) {
             const body = (m[1] || '').trim();
-            if (curSource && body && !seenSource.has(curSource)) {
+            if (curSource && body && !seenSource.has(curSource) && dict.sentence.length < 3) {
                 seenSource.add(curSource);
                 dict.sentence.push({ source: curSource, target: body });
             }
             curSource = '';
             pending = null;
-            if (body) done = true; // 译文是格式的最后一行
         } else if (pending === 'source') {
             curSource = line;
             pending = 'target';
         } else if (pending === 'target') {
-            if (curSource && !seenSource.has(curSource)) {
+            if (curSource && !seenSource.has(curSource) && dict.sentence.length < 3) {
                 seenSource.add(curSource);
                 dict.sentence.push({ source: curSource, target: line });
-                done = true;
             }
             curSource = '';
             pending = null;
@@ -562,6 +590,9 @@ async function translate(text, from, to, options) {
         { role: 'user', content: fillPrompt(QUICK_TRANSLATE_PROMPT, text, from, to, detect) },
     ];
 
+    // 词典卡片质量：有词义的卡片优先——词义是词典的核心，混元卡片缺词义时改用 Qwen 的结果
+    const cardQuality = (d) => (d ? (d.explanations.length > 0 ? 2 : 0) + (d.sentence.length > 0 ? 1 : 0) : -1);
+
     // 快速译文（极短输出，先行展示）
     const quickVia = (model, show) =>
         chat(model, quickMessages, 0.7, show).then((content) => content, () => '');
@@ -595,9 +626,10 @@ async function translate(text, from, to, options) {
             const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
             const qwenP = jsonDictVia(MODEL_QWEN);
             const hun = await hunyuanP;
-            if (hun.dict) return finish(hun.dict);
             const qwen = await qwenP;
+            if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finish(hun.dict);
             if (qwen.dict) return finish(qwen.dict);
+            if (hun.dict) return finish(hun.dict);
             const qwenText = await textDictVia(MODEL_QWEN, show);
             if (qwenText.dict) return finish(qwenText.dict);
             if (qwenText.content) return finish(qwenText.content);
@@ -667,9 +699,10 @@ async function translate(text, from, to, options) {
         const quick = await quickVia(MODEL_HUNYUAN, show);
         const hunyuanP = textDictVia(MODEL_HUNYUAN, show);
         const hun = await hunyuanP;
-        if (hun.dict) return finish(hun.dict);
         const qwen = await qwenP;
+        if (cardQuality(hun.dict) >= cardQuality(qwen.dict) && hun.dict) return finish(hun.dict);
         if (qwen.dict) return finish(qwen.dict);
+        if (hun.dict) return finish(hun.dict);
         const qwenText = await textDictVia(MODEL_QWEN, show);
         if (qwenText.dict) return finish(qwenText.dict);
         if (qwenText.content) return finish(qwenText.content);
