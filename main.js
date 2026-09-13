@@ -808,7 +808,9 @@ async function translate(text, from, to, options) {
                     await doLoad();
                 } catch (e) {
                     const errCard = JSON.parse(JSON.stringify({ ...simpleDict, sentence: [] }));
-                    errCard.associations = [...(errCard.associations || []).slice(0, 9), '⚠️ 详细解释获取失败，请稍后重试'];
+                    errCard.associations = ['⚠️ 详细解释获取失败，请稍后重试'];
+                    // 失败卡片保留重试入口（复用刷新处理函数），点击可重新加载详尽版
+                    errCard.sentence.push({ source: link('↻ 重试详细解释', refreshName), target: '' });
                     if (setResult) setResult(errCard);
                 }
                 busy = false;
@@ -996,14 +998,14 @@ async function translate(text, from, to, options) {
     }
 
     if (mode === 'auto') {
-        // 智能模式句子：混元优先（意译自然、翻译特调），千问兜底
+        // 默认模式：千问优先，混元兜底
         try {
-            return await chat(MODEL_HUNYUAN, null, null, (v) => setResult && setResult(v));
+            return await chat(MODEL_QWEN, null, null, (v) => setResult && setResult(v));
         } catch (e) {
             try {
-                return await chat(MODEL_QWEN, null, null, (v) => setResult && setResult(v));
+                return await chat(MODEL_HUNYUAN, null, null, (v) => setResult && setResult(v));
             } catch (e2) {
-                throw `句子翻译失败（混元与千问均不可用）\n混元: ${String(e)}\n千问: ${String(e2)}`;
+                throw `句子翻译失败（千问与混元均不可用）\n千问: ${String(e)}\n混元: ${String(e2)}`;
             }
         }
     }

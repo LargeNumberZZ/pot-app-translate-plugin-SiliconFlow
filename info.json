@@ -15,10 +15,10 @@
       "display": "翻译模式",
       "type": "select",
       "options": {
-        "auto": "智能模式（推荐）",
+        "auto": "千问优先，混元兜底（默认）",
         "dual": "双模型对照",
         "hunyuan": "仅混元",
-        "qwen": "仅 Qwen"
+        "qwen": "仅千问"
       }
     },
     {
