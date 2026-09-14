@@ -940,8 +940,9 @@ async function translate(text, from, to, options) {
     }
 
     if (mode === 'auto' && useDict) {
-        // 智能模式查词：千问 JSON 简明词典优先（词性准确）；混元快速译文先行展示（1~2 秒），
-        // 千问失败时混元行格式词典兜底（流式展示）
+        // 默认模式查词：不做快速译文预览，直接请求千问 JSON 简明词典（词性准确、速度与仅千问一致）；
+        // 千问失败时混元行格式词典兜底（流式展示），再不行千问纯文本兜底。
+        // 混元在本模式下仅作为兜底。
         let live = true;
         const show = (v) => {
             if (live && setResult) setResult(v);
@@ -951,21 +952,14 @@ async function translate(text, from, to, options) {
             return v;
         };
         const finishCard = (d) => finish(withDetailButton(d));
-        // 免费档对同账号并发请求限流：并行时两个请求互相拖慢（实测千问词典被拖到 20 秒级、
-        // 混元快速译文甚至拿不到首个 token），改为顺序请求——先混元快速译文（1~2 秒，流式展示），
-        // 完成后再发千问简明词典；等词典期间在快速译文下方显示进度提示
-        const quick = await quickVia(MODEL_HUNYUAN, show);
-        if (live && setResult) setResult((quick ? quick + '\n\n' : '') + '⏳ 正在生成词典卡片…');
         const qwen = await jsonDictVia(MODEL_QWEN);
         if (qwen.dict) return finishCard(qwen.dict);
-        const hun = await textDictVia(MODEL_HUNYUAN, show);  // 混元行格式兜底（流式展示）
+        const hun = await textDictVia(MODEL_HUNYUAN, show);
         if (hun.dict) return finishCard(hun.dict);
         if (hun.content) return finish(hun.content);
         const qwenText = await textDictVia(MODEL_QWEN, show);
         if (qwenText.dict) return finishCard(qwenText.dict);
         if (qwenText.content) return finish(qwenText.content);
-        if (hun.content) return finish(hun.content);
-        if (quick) return finish(quick);
         throw '词典查询失败：请检查 API Key、网络或稍后重试';
     }
 
@@ -990,7 +984,6 @@ async function translate(text, from, to, options) {
             if (hun.dict) return finishCard(hun.dict);
             if (hun.content) return finish(hun.content);
         } else {
-            if (live && setResult) setResult((quick ? quick + '\n\n' : '') + '⏳ 正在生成词典卡片…');
             const qj = await jsonDictVia(model);
             if (qj.dict) return finishCard(qj.dict);
             const qt = await textDictVia(model, show);

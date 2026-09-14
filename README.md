@@ -7,7 +7,7 @@ A [Pot](https://pot-app.com/) translate plugin powered by the **free** models on
 | Model | Role |
 | --- | --- |
 | `Qwen/Qwen2.5-7B-Instruct` | Primary for everything you see as the final result: the lean dictionary card, the detailed entry, sentence translation |
-| `tencent/Hunyuan-MT-7B` | Fallback for all of the above + a **temporary** quick-translation preview shown for the first 1-2 s of a word lookup (replaced by the Qwen dictionary card) |
+| `tencent/Hunyuan-MT-7B` | Fallback for all of the above |
 
 ## Features
 
