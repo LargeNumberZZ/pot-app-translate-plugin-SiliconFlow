@@ -951,9 +951,12 @@ async function translate(text, from, to, options) {
             return v;
         };
         const finishCard = (d) => finish(withDetailButton(d));
-        const qwenP = jsonDictVia(MODEL_QWEN);               // 千问 JSON 简明词典（主力）并行发出
-        const quick = await quickVia(MODEL_HUNYUAN, show);   // 混元快速译文先行展示（1~2 秒）
-        const qwen = await qwenP;                            // 千问简明词典就绪
+        // 免费档对同账号并发请求限流：并行时两个请求互相拖慢（实测千问词典被拖到 20 秒级、
+        // 混元快速译文甚至拿不到首个 token），改为顺序请求——先混元快速译文（1~2 秒，流式展示），
+        // 完成后再发千问简明词典；等词典期间在快速译文下方显示进度提示
+        const quick = await quickVia(MODEL_HUNYUAN, show);
+        if (live && setResult) setResult((quick ? quick + '\n\n' : '') + '⏳ 正在生成词典卡片…');
+        const qwen = await jsonDictVia(MODEL_QWEN);
         if (qwen.dict) return finishCard(qwen.dict);
         const hun = await textDictVia(MODEL_HUNYUAN, show);  // 混元行格式兜底（流式展示）
         if (hun.dict) return finishCard(hun.dict);
@@ -987,6 +990,7 @@ async function translate(text, from, to, options) {
             if (hun.dict) return finishCard(hun.dict);
             if (hun.content) return finish(hun.content);
         } else {
+            if (live && setResult) setResult((quick ? quick + '\n\n' : '') + '⏳ 正在生成词典卡片…');
             const qj = await jsonDictVia(model);
             if (qj.dict) return finishCard(qj.dict);
             const qt = await textDictVia(model, show);
