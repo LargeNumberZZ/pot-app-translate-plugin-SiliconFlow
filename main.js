@@ -741,8 +741,9 @@ async function translate(text, from, to, options) {
                         (content) => ({ dict: parseDictText(content) }),
                         () => ({ dict: null })
                     );
-                if (mode === 'qwen') return [viaQwen];
-                if (mode === 'hunyuan') return [viaHunyuan];
+                if (mode === 'qwen') return [viaQwen, viaHunyuan];
+                // 仅混元：简明卡片纯混元；详细释义结构复杂、混元遵循度差，追加千问 JSON 兜底
+                if (mode === 'hunyuan') return [viaHunyuan, viaQwen];
                 return [viaQwen, viaHunyuan];
             })();
             // 合并兜底：简明版的音标/词义必须出现在详细版中（模型偶发遗漏时从简明版补回）
@@ -828,6 +829,23 @@ async function translate(text, from, to, options) {
             window[simpleName] = () => {
                 if (setResult) setResult(simpleView());
             };
+            // 预加载：简明卡片返回后立即后台请求详细释义，就绪后自动替换显示。
+            // 用户手动点击时若已就绪则瞬时切换（走 detailName 缓存分支）。
+            const preload = async () => {
+                await sleep(600); // 稍等片刻再发，避免与简明卡片请求贴太近
+                try {
+                    if (detail) return;
+                    detail = mergeSimpleInto(await loadDetail());
+                } catch (e) {
+                    return; // 预加载失败不打扰用户，点击详细解释时仍会正式尝试一次
+                }
+                if (detail) {
+                    live2 = false;
+                    if (setResult) setResult(detailView());
+                }
+            };
+            let live2 = true; // 预加载结果应用标记：pot 已切换到新翻译时不再写结果
+            preload();
             return simpleView();
         } catch (e) {
             return simpleDict; // 附加按钮失败不影响原卡片

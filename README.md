@@ -11,7 +11,7 @@ A [Pot](https://pot-app.com/) translate plugin powered by the **free** models on
 
 ## Features
 
-- **Dictionary card for words and phrases**: UK & US IPA plus senses grouped by POS (Qwen). A "More details" link loads a richer entry on demand — more senses, collocations, inflections, synonyms and two example pairs — with instant back/refresh switching.
+- **Dictionary card for words and phrases**: UK & US IPA plus senses grouped by POS (Qwen). The detailed entry — more senses, collocations, inflections, synonyms and two example pairs — is **preloaded automatically** once the simple card appears and replaces it in place when ready; the More details / back / refresh links switch between the cached views instantly. In Hunyuan-only mode the detailed entry falls back to Qwen JSON when Hunyuan's line format fails.
 - **Sentence / paragraph translation** (Qwen, Hunyuan fallback): translate only — no markdown, no re-formatting; paragraphs and line breaks mirror the source exactly.
 - **Streaming display with a 20 s timeout**: text appears as it is generated; on timeout the partial output is returned instead of erroring out.
 - **Custom prompts**: dictionary / sentence / system prompts with `$text` `$from` `$to` `$detect` placeholders (same as Pot's built-in AI services); languages are expanded to English names (`zh_cn` → `Simplified Chinese`) for better model understanding.
